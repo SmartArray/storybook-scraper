@@ -67,58 +67,113 @@ async function main() {
     // Give Storybook a moment to render docs
     await page.waitForTimeout(2000);
 
-    // Click all "Show code" buttons
+    // Click all "Show code" toggles/buttons so .os-content / prism blocks appear
     try {
       await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button'));
-        for (const btn of buttons) {
-          const text = (btn.textContent || '').trim().toLowerCase();
-          if (text.includes('show code')) {
-            btn.click();
-          }
-        }
+        const normalize = (s) => (s || '').replace(/\u00A0/g, ' ').trim();
 
-        // Some Storybook versions use toggle switches
-        const toggles = Array.from(
-          document.querySelectorAll('.docblock-code-toggle, [data-testid="docblock-code-toggle"]')
-        );
-        for (const el of toggles) {
-          const text = (el.textContent || '').trim().toLowerCase();
+        const clickIfShowCode = (el) => {
+          const text = normalize(el.textContent || '').toLowerCase();
           if (text.includes('show code')) {
-            el.click();
+            if (typeof el.click === 'function') {
+              el.click();
+            }
           }
-        }
+        };
+
+        const buttons = Array.from(document.querySelectorAll('button'));
+        buttons.forEach(clickIfShowCode);
+
+        const toggles = Array.from(
+          document.querySelectorAll(
+            '.docblock-code-toggle, [data-testid="docblock-code-toggle"]'
+          )
+        );
+        toggles.forEach(clickIfShowCode);
       });
-      await page.waitForTimeout(500);
+
+      // small delay so DOM updates after toggles
+      await page.waitForTimeout(800);
     } catch {
-      // non-fatal
+      // non-fatal, continue
     }
 
     const content = await page.evaluate(() => {
-      const normalize = (s) => (s || '').replace(/\u00A0/g, ' ').trim();
+      const normalize = (s) => (s || '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
 
-      const codeBlocks = Array.from(
-        document.querySelectorAll('pre code, .docblock-source code')
-      ).map((code) => {
-        const langAttr = code.getAttribute('data-language') || '';
-        const className = code.className || '';
+      // ---- CODE BLOCKS ----
+      const codeBlocks = [];
+      const seenCode = new Set();
+
+      const addCodeBlockFromElement = (el) => {
+        if (!el) return;
+        const text = normalize(el.textContent || '');
+        if (!text) return;
+        if (seenCode.has(text)) return;
+        seenCode.add(text);
+
+        const langAttr = el.getAttribute && el.getAttribute('data-language');
+        const className = el.className || '';
         const match = /language-([\w-]+)/.exec(className);
         const language = langAttr || (match ? match[1] : '');
-        return {
-          language,
-          code: normalize(code.textContent || '')
-        };
-      });
 
+        codeBlocks.push({ language, code: text });
+      };
+
+      // Common places Storybook puts rendered code:
+      const candidates = Array.from(
+        new Set([
+          ...Array.from(document.querySelectorAll('pre code')),
+          ...Array.from(document.querySelectorAll('.docblock-source code')),
+          ...Array.from(document.querySelectorAll('.os-content pre')),
+          ...Array.from(document.querySelectorAll('.os-content code')),
+          ...Array.from(document.querySelectorAll('pre.prismjs')),
+          ...Array.from(document.querySelectorAll('code.prismjs'))
+        ])
+      );
+
+      candidates.forEach(addCodeBlockFromElement);
+
+      // ---- TABLES ----
       const tables = Array.from(
         document.querySelectorAll('.docblock-argstable, table.docblock-argstable')
       ).map((table) => {
         const headers = Array.from(table.querySelectorAll('thead th')).map((th) =>
           normalize(th.textContent || '')
         );
-        const rows = Array.from(table.querySelectorAll('tbody tr')).map((tr) =>
-          Array.from(tr.querySelectorAll('td')).map((td) => normalize(td.textContent || ''))
-        );
+
+        const rows = Array.from(table.querySelectorAll('tbody tr')).map((tr) => {
+          const cells = Array.from(tr.querySelectorAll('td')).map((td) => {
+            const parts = [];
+
+            td.childNodes.forEach((node) => {
+              // text nodes: usually "boolean", "undefined", etc.
+              if (node.nodeType === Node.TEXT_NODE) {
+                const txt = normalize(node.textContent || '');
+                if (txt) parts.push(txt);
+              }
+              // top-level <code> nodes: types, literal values, etc.
+              if (node.nodeType === Node.ELEMENT_NODE) {
+                const el = /** @type {HTMLElement} */ (node);
+                if (el.tagName && el.tagName.toLowerCase() === 'code') {
+                  const txt = normalize(el.textContent || '');
+                  if (txt) parts.push(txt);
+                }
+              }
+            });
+
+            let cellText = parts.join(' | ');
+            if (!cellText) {
+              // fallback to full text if nothing collected
+              cellText = normalize(td.textContent || '');
+            }
+
+            return cellText;
+          });
+
+          return cells;
+        });
+
         return { headers, rows };
       });
 
@@ -173,9 +228,10 @@ function buildMarkdownForStory(story, content, lastTitleParts) {
       const tableHeadingLevel = storyHeadingLevel + 1;
       md += `${'#'.repeat(tableHeadingLevel)} Props table ${idx + 1}\n\n`;
 
-      const headers = table.headers.length
-        ? table.headers
-        : table.rows[0]?.map((_, i) => `Column ${i + 1}`) || [];
+      const headers =
+        table.headers.length > 0
+          ? table.headers
+          : table.rows[0]?.map((_, i) => `Column ${i + 1}`) || [];
 
       if (headers.length === 0) return;
 
