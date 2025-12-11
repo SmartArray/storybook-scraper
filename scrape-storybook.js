@@ -70,10 +70,11 @@ async function main() {
     // Click all "Show code" toggles/buttons so .os-content / prism blocks appear
     try {
       await page.evaluate(() => {
-        const normalize = (s) => (s || '').replace(/\u00A0/g, ' ').trim();
+        const normalizeInline = (s) =>
+          (s || '').replace(/\u00A0/g, ' ').trim().toLowerCase();
 
         const clickIfShowCode = (el) => {
-          const text = normalize(el.textContent || '').toLowerCase();
+          const text = normalizeInline(el.textContent || '');
           if (text.includes('show code')) {
             if (typeof el.click === 'function') {
               el.click();
@@ -99,7 +100,18 @@ async function main() {
     }
 
     const content = await page.evaluate(() => {
-      const normalize = (s) => (s || '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+      const normalizeInline = (s) =>
+        (s || '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
+
+      // preserve newlines for code blocks
+      const normalizeCode = (s) => {
+        if (!s) return '';
+        let t = s.replace(/\u00A0/g, ' ');
+        t = t.replace(/\r\n/g, '\n');
+        // Trim trailing spaces before newlines and at the very end
+        t = t.replace(/[ \t]+\n/g, '\n').replace(/[ \t]+$/g, '');
+        return t;
+      };
 
       // ---- CODE BLOCKS ----
       const codeBlocks = [];
@@ -107,7 +119,8 @@ async function main() {
 
       const addCodeBlockFromElement = (el) => {
         if (!el) return;
-        const text = normalize(el.textContent || '');
+        const rawText = el.textContent || '';
+        const text = normalizeCode(rawText);
         if (!text) return;
         if (seenCode.has(text)) return;
         seenCode.add(text);
@@ -139,36 +152,28 @@ async function main() {
         document.querySelectorAll('.docblock-argstable, table.docblock-argstable')
       ).map((table) => {
         const headers = Array.from(table.querySelectorAll('thead th')).map((th) =>
-          normalize(th.textContent || '')
+          normalizeInline(th.textContent || '')
         );
 
         const rows = Array.from(table.querySelectorAll('tbody tr')).map((tr) => {
           const cells = Array.from(tr.querySelectorAll('td')).map((td) => {
-            const parts = [];
+            const tokens = [];
+            const walker = document.createTreeWalker(td, NodeFilter.SHOW_TEXT, null);
 
-            td.childNodes.forEach((node) => {
-              // text nodes: usually "boolean", "undefined", etc.
-              if (node.nodeType === Node.TEXT_NODE) {
-                const txt = normalize(node.textContent || '');
-                if (txt) parts.push(txt);
-              }
-              // top-level <code> nodes: types, literal values, etc.
-              if (node.nodeType === Node.ELEMENT_NODE) {
-                const el = /** @type {HTMLElement} */ (node);
-                if (el.tagName && el.tagName.toLowerCase() === 'code') {
-                  const txt = normalize(el.textContent || '');
-                  if (txt) parts.push(txt);
-                }
-              }
-            });
-
-            let cellText = parts.join(' | ');
-            if (!cellText) {
-              // fallback to full text if nothing collected
-              cellText = normalize(td.textContent || '');
+            let node;
+            while ((node = walker.nextNode())) {
+              const txt = normalizeInline(node.textContent || '');
+              if (txt) tokens.push(txt);
             }
 
-            return cellText;
+            if (tokens.length > 0) {
+              // Join all text segments with a space;
+              // handles boolean + undefined, "sm""md""lg", etc.
+              return tokens.join(' ');
+            }
+
+            // Fallback: just use flattened textContent
+            return normalizeInline(td.textContent || '');
           });
 
           return cells;
